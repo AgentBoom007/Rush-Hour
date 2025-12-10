@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import os
 from datetime import datetime
 
+
+
+
 # --- API and Database Configuration ---
 DB_NAME = 'brewery_weather_db.sqlite'
 BREWERY_BASE_URL = "https://api.openbrewerydb.org/v1/breweries"
