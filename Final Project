@@ -213,14 +213,17 @@ def write_calculation_to_file(data, filename='calculations.txt'):
 def run_correlation_calculation(conn, location_id):
     """
     Performs the SQL calculation using a database JOIN.
+    FIXED: Uses COUNT(DISTINCT B.BreweryID) to prevent the weather data from
+           multiplying the brewery count (Cartesian Join issue).
     """
     cur = conn.cursor()
     
-    # Uses COUNT() and AVG() functions and two explicit JOINs (Rubric requirement)
+    # Uses COUNT(DISTINCT) and AVG() functions and two explicit JOINs
     query = '''
     SELECT 
         ROUND(AVG(W.MaxTemp), 2) AS Avg_Max_Temp_C,
-        COUNT(B.BreweryID) AS Total_Micro_Breweries
+        -- THIS LINE IS THE FIX: Only counts unique Brewery IDs
+        COUNT(DISTINCT B.BreweryID) AS Total_Micro_Breweries
     FROM Breweries AS B
     JOIN Locations AS L ON B.LocationID = L.LocationID
     JOIN Weather AS W ON L.LocationID = W.LocationID
@@ -239,6 +242,7 @@ def run_correlation_calculation(conn, location_id):
         data = {'avg_temp': avg_temp, 'micro_count': micro_count}
         write_calculation_to_file(data)
         
+        # The corrected output will now show the true number of microbreweries (~37)
         return avg_temp, micro_count
     else:
         print("\n[Calculation]: No data found for calculation. Run the script more times.")
