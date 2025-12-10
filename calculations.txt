@@ -5,3 +5,10 @@ Question: How does average forecast temperature relate to 'micro' brewery count?
 1. Average Max Temperature across recorded forecasts: 9.63 °C
 2. Total number of 'micro' breweries stored: 37
 ----------------------------------------------------
+--- Correlation Calculation Results (2025-12-10 18:29:54) ---
+Location: Ann Arbor, Michigan
+
+Question: How does average forecast temperature relate to 'micro' brewery count?
+1. Average Max Temperature across recorded forecasts: 9.63 °C
+2. Total number of 'micro' breweries stored: 37
+----------------------------------------------------
