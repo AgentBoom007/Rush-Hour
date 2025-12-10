@@ -1,1 +1,325 @@
+import requests
+import sqlite3
+import json
+import pandas as pd
+import matplotlib.pyplot as plt
+import os # Used to check for the database file
 
+# --- API and Database Configuration ---
+DB_NAME = 'brewery_weather_db.sqlite'
+BREWERY_BASE_URL = "https://api.openbrewerydb.org/v1/breweries"
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+
+# Ann Arbor, MI - Used for the weather data (from your specified URL)
+TARGET_LAT = 42.2776
+TARGET_LONG = -83.7409
+TARGET_CITY = "Ann Arbor"
+TARGET_STATE = "Michigan"
+
+# Rubric Requirement: Max of 25 items stored per run
+PER_PAGE_LIMIT = 25 
+ROW_MINIMUM = 100 # Rubric Requirement: Store at least 100 rows total
+
+# --- 1. Database Functions ---
+
+def create_database(db_name):
+    """
+    Creates the database connection and the required tables:
+    Locations (Parent), Breweries (Child, linked by LocationID), and Weather.
+    """
+    conn = sqlite3.connect(db_name)
+    cur = conn.cursor()
+
+    # Table 1: LOCATIONS (The Parent Table for the shared integer key)
+    # Stores unique geographical data.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS Locations (
+            LocationID INTEGER PRIMARY KEY,
+            City TEXT NOT NULL,
+            State TEXT NOT NULL,
+            Latitude REAL,
+            Longitude REAL,
+            UNIQUE (City, State)
+        )
+    ''')
+
+    # Table 2: BREWERIES (Linked to Locations by LocationID - Foreign Key)
+    # This fulfills the "2-tables with integer key" requirement.
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS Breweries (
+            BreweryID INTEGER PRIMARY KEY AUTOINCREMENT,
+            Name TEXT NOT NULL,
+            BreweryType TEXT,
+            WebsiteURL TEXT,
+            LocationID INTEGER,
+            FOREIGN KEY (LocationID) REFERENCES Locations(LocationID)
+        )
+    ''')
+
+    # Table 3: WEATHER (Data from the second API, linked by LocationID)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS Weather (
+            WeatherID INTEGER PRIMARY KEY AUTOINCREMENT,
+            Date TEXT NOT NULL,
+            MaxTemp REAL,
+            SunshineDuration REAL,
+            PrecipitationSum REAL,
+            WindGustsMax REAL,
+            LocationID INTEGER,
+            UNIQUE (Date, LocationID),
+            FOREIGN KEY (LocationID) REFERENCES Locations(LocationID)
+        )
+    ''')
+    conn.commit()
+    print("Database and tables initialized.")
+    return conn
+
+def get_or_create_location(cur, city, state, lat, long):
+    """Checks if a location exists and returns its ID, or creates it if not."""
+    cur.execute("SELECT LocationID FROM Locations WHERE City = ? AND State = ?", (city, state))
+    result = cur.fetchone()
+    if result:
+        print(f"Location '{city}, {state}' found (ID: {result[0]}).")
+        return result[0] # LocationID
+    else:
+        cur.execute("INSERT INTO Locations (City, State, Latitude, Longitude) VALUES (?, ?, ?, ?)",
+                    (city, state, lat, long))
+        new_id = cur.lastrowid
+        print(f"Location '{city}, {state}' created (ID: {new_id}).")
+        return new_id # Return the new LocationID
+
+# --- 2. Data Fetching and Insertion Functions ---
+
+def fetch_and_store_breweries(conn, location_id, state=TARGET_STATE):
+    """
+    Fetches up to 25 brewery items at a time and inserts them.
+    It calculates the next page to fetch to ensure total rows > 100 over multiple runs.
+    """
+    cur = conn.cursor()
+    
+    # Check current total row count to determine which page to fetch next
+    cur.execute("SELECT COUNT(*) FROM Breweries WHERE LocationID = ?", (location_id,))
+    current_count = cur.fetchone()[0]
+    
+    # Calculate the next page number (page 1 is 0-24, page 2 is 25-49, etc.)
+    next_page = (current_count // PER_PAGE_LIMIT) + 1
+    
+    if current_count >= ROW_MINIMUM:
+        print(f"\n[Breweries]: Already stored {current_count} rows (Target: {ROW_MINIMUM}). Skipping fetch.")
+        print("Run the script a few more times to ensure you reach 100+ rows.")
+        return 0
+
+    print(f"\n[Breweries]: Fetching page {next_page} (Max {PER_PAGE_LIMIT} items) for '{state}'...")
+
+    # Configure API parameters for the fetch
+    params = {
+        'by_state': state,
+        'per_page': PER_PAGE_LIMIT,
+        'page': next_page
+    }
+    
+    try:
+        response = requests.get(BREWERY_BASE_URL, params=params)
+        response.raise_for_status()
+        brewery_data = response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching brewery data: {e}")
+        return 0
+
+    inserted_count = 0
+    for brewery in brewery_data:
+        try:
+            cur.execute(
+                '''
+                INSERT INTO Breweries (Name, BreweryType, WebsiteURL, LocationID) 
+                VALUES (?, ?, ?, ?)
+                ''', 
+                (brewery.get('name'), brewery.get('brewery_type'), brewery.get('website_url'), location_id)
+            )
+            inserted_count += 1
+        except sqlite3.IntegrityError:
+            # Handle potential duplicates if the API returns them
+            continue
+
+    conn.commit()
+    print(f"[Breweries]: Successfully stored {inserted_count} new entries. Total stored so far: {current_count + inserted_count}.")
+    return inserted_count
+
+def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG):
+    """Fetches daily forecast data from Open-Meteo and stores it."""
+    cur = conn.cursor()
+
+    # Use the parameters from your provided URL
+    params = {
+        'latitude': lat,
+        'longitude': long,
+        'daily': 'temperature_2m_max,sunshine_duration,precipitation_sum,wind_gusts_10m_max',
+        'timezone': 'America/New_York'
+    }
+    
+    print("\n[Weather]: Fetching daily forecast...")
+    
+    try:
+        response = requests.get(WEATHER_URL, params=params)
+        response.raise_for_status()
+        weather_data = response.json().get('daily', {})
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching weather data: {e}")
+        return 0
+
+    inserted_count = 0
+    
+    # Extract parallel arrays from the JSON response
+    dates = weather_data.get('time', [])
+    max_temps = weather_data.get('temperature_2m_max', [])
+    sunshine = weather_data.get('sunshine_duration', [])
+    precip = weather_data.get('precipitation_sum', [])
+    wind_gusts = weather_data.get('wind_gusts_10m_max', [])
+    
+    # Insert data row by row
+    for i in range(len(dates)):
+        try:
+            cur.execute(
+                '''
+                INSERT INTO Weather (Date, MaxTemp, SunshineDuration, PrecipitationSum, WindGustsMax, LocationID)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ''',
+                (dates[i], max_temps[i], sunshine[i], precip[i], wind_gusts[i], location_id)
+            )
+            inserted_count += 1
+        except sqlite3.IntegrityError:
+            # Skip if data for this date/location already exists
+            continue
+            
+    conn.commit()
+    print(f"[Weather]: Successfully stored {inserted_count} unique daily forecasts.")
+    return inserted_count
+
+# --- 3. Data Processing (SQL Calculation) ---
+
+def run_correlation_calculation(conn, location_id):
+    """
+    Performs a calculation by joining all three tables.
+    Calculates the average max temperature over the forecast period
+    and the total count of 'micro' breweries in the location.
+    """
+    cur = conn.cursor()
+    
+    # The SQL query joins Breweries, Locations, and Weather tables to compare aggregated data.
+    # This fulfills the "calculate something" rubric requirement using DB data.
+    query = '''
+    SELECT 
+        ROUND(AVG(W.MaxTemp), 2) AS Avg_Max_Temp_C,
+        COUNT(B.BreweryID) AS Total_Micro_Breweries
+    FROM Breweries AS B
+    JOIN Locations AS L ON B.LocationID = L.LocationID
+    JOIN Weather AS W ON L.LocationID = W.LocationID
+    WHERE 
+        B.BreweryType = 'micro' AND 
+        L.LocationID = ?;
+    '''
+    
+    cur.execute(query, (location_id,))
+    result = cur.fetchone()
+    
+    print("\n--- Final Project Calculation Output ---")
+    if result and result[0] is not None:
+        avg_temp, micro_count = result
+        print(f"Correlation Question: How does average forecast temperature relate to 'micro' brewery count?")
+        print(f"Location: {TARGET_CITY}, {TARGET_STATE} (ID: {location_id})")
+        print(f"1. Average Max Temperature across recorded forecasts: {avg_temp} °C")
+        print(f"2. Total number of 'micro' breweries stored: {micro_count}")
+        print("Interpretation: You now have the metrics needed to assess the correlation.")
+        print("--------------------------------------")
+        return avg_temp, micro_count
+    else:
+        print("No data found for calculation. Ensure you have run the script enough times to fetch data.")
+        return None, None
+
+# --- 4. Visualization ---
+
+def create_visualization(db_name):
+    """
+    Fetches data from the database and generates a visualization.
+    Creates a bar chart showing the count of major brewery types.
+    """
+    try:
+        conn = sqlite3.connect(db_name)
+        
+        # Query to get the count of each brewery type
+        query = '''
+        SELECT 
+            BreweryType, 
+            COUNT(BreweryID) AS Count
+        FROM Breweries
+        GROUP BY BreweryType
+        ORDER BY Count DESC
+        LIMIT 5;
+        '''
+        
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        if df.empty:
+            print("\n[Visualization]: No brewery data to visualize. Ensure you have run the script to fetch data.")
+            return
+
+        # Create a Bar Chart
+        plt.figure(figsize=(10, 6))
+        plt.bar(df['BreweryType'], df['Count'], color='skyblue')
+        
+        plt.title(f'Top 5 Brewery Types in {TARGET_STATE} (Total Breweries Stored)', fontsize=14)
+        plt.xlabel('Brewery Type', fontsize=12)
+        plt.ylabel('Count of Breweries', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.grid(axis='y', alpha=0.7)
+        plt.tight_layout()
+        
+        viz_filename = 'brewery_type_distribution.png'
+        plt.savefig(viz_filename) # Save the plot to a file
+        
+        print(f"\n[Visualization]: Bar chart saved as '{viz_filename}'.")
+        print("You must include this image in your final report!")
+
+    except Exception as e:
+        print(f"\n[Visualization] Error creating visualization: {e}")
+
+
+# --- 5. Main Execution ---
+
+def main():
+    """
+    The main function that orchestrates the project execution.
+    """
+    
+    # 1. Database Setup
+    conn = create_database(DB_NAME)
+    cur = conn.cursor()
+    
+    # 2. Get/Create Anchor Location (Ann Arbor, MI)
+    # This ID is the Foreign Key linking Breweries and Weather
+    location_id_ann_arbor = get_or_create_location(cur, TARGET_CITY, TARGET_STATE, TARGET_LAT, TARGET_LONG)
+    conn.commit()
+    
+    # 3. Data Gathering (API 1: Breweries)
+    # The script must be run multiple times to reach the 100 row minimum.
+    print("\n---------------------------------------------------------")
+    print("ACTION REQUIRED: Run this script 4+ times to hit 100+ rows.")
+    print("---------------------------------------------------------")
+    fetch_and_store_breweries(conn, location_id_ann_arbor)
+    
+    # 4. Data Gathering (API 2: Weather)
+    # Fetches 7-14 days of forecast data once per run.
+    fetch_and_store_weather(conn, location_id_ann_arbor)
+    
+    # 5. Data Processing/Calculation
+    run_correlation_calculation(conn, location_id_ann_arbor)
+    
+    # 6. Visualization
+    create_visualization(DB_NAME)
+
+    conn.close()
+    print("\n*** Project run complete. Database connection closed. ***")
+
+if __name__ == "__main__":
+    main()
