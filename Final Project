@@ -3,35 +3,35 @@ import sqlite3
 import json
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
-from datetime import datetime
+import os # Used to check for the database file
 
 # --- API and Database Configuration ---
 DB_NAME = 'brewery_weather_db.sqlite'
 BREWERY_BASE_URL = "https://api.openbrewerydb.org/v1/breweries"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Ann Arbor, MI - Anchor location for the correlation study
+# Ann Arbor, MI - Used for the weather data (from your specified URL)
 TARGET_LAT = 42.2776
 TARGET_LONG = -83.7409
 TARGET_CITY = "Ann Arbor"
 TARGET_STATE = "Michigan"
 
-# Rubric Requirement: Max of 25 items stored per run 
+# Rubric Requirement: Max of 25 items stored per run
 PER_PAGE_LIMIT = 25 
-ROW_MINIMUM = 100 # Rubric Requirement: Store at least 100 rows total 
+ROW_MINIMUM = 100 # Rubric Requirement: Store at least 100 rows total
 
 # --- 1. Database Functions ---
 
 def create_database(db_name):
     """
-    Creates the database connection and the required tables.
-    Locations.LocationID is the INTEGER PRIMARY KEY shared across Breweries and Weather. 
+    Creates the database connection and the required tables:
+    Locations (Parent), Breweries (Child, linked by LocationID), and Weather.
     """
     conn = sqlite3.connect(db_name)
     cur = conn.cursor()
 
     # Table 1: LOCATIONS (The Parent Table for the shared integer key)
+    # Stores unique geographical data.
     cur.execute('''
         CREATE TABLE IF NOT EXISTS Locations (
             LocationID INTEGER PRIMARY KEY,
@@ -44,6 +44,7 @@ def create_database(db_name):
     ''')
 
     # Table 2: BREWERIES (Linked to Locations by LocationID - Foreign Key)
+    # This fulfills the "2-tables with integer key" requirement.
     cur.execute('''
         CREATE TABLE IF NOT EXISTS Breweries (
             BreweryID INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +71,7 @@ def create_database(db_name):
         )
     ''')
     conn.commit()
-    print(f"Database '{db_name}' and tables initialized.")
+    print("Database and tables initialized.")
     return conn
 
 def get_or_create_location(cur, city, state, lat, long):
@@ -78,32 +79,39 @@ def get_or_create_location(cur, city, state, lat, long):
     cur.execute("SELECT LocationID FROM Locations WHERE City = ? AND State = ?", (city, state))
     result = cur.fetchone()
     if result:
-        return result[0]
+        print(f"Location '{city}, {state}' found (ID: {result[0]}).")
+        return result[0] # LocationID
     else:
         cur.execute("INSERT INTO Locations (City, State, Latitude, Longitude) VALUES (?, ?, ?, ?)",
                     (city, state, lat, long))
-        return cur.lastrowid
+        new_id = cur.lastrowid
+        print(f"Location '{city}, {state}' created (ID: {new_id}).")
+        return new_id # Return the new LocationID
 
 # --- 2. Data Fetching and Insertion Functions ---
 
 def fetch_and_store_breweries(conn, location_id, state=TARGET_STATE):
     """
-    Fetches up to 25 brewery items at a time. Designed to be run multiple times
-    to meet the 100-row minimum without changing the source code. [cite: 103, 47, 48]
+    Fetches up to 25 brewery items at a time and inserts them.
+    It calculates the next page to fetch to ensure total rows > 100 over multiple runs.
     """
     cur = conn.cursor()
     
+    # Check current total row count to determine which page to fetch next
     cur.execute("SELECT COUNT(*) FROM Breweries WHERE LocationID = ?", (location_id,))
     current_count = cur.fetchone()[0]
     
+    # Calculate the next page number (page 1 is 0-24, page 2 is 25-49, etc.)
     next_page = (current_count // PER_PAGE_LIMIT) + 1
     
     if current_count >= ROW_MINIMUM:
         print(f"\n[Breweries]: Already stored {current_count} rows (Target: {ROW_MINIMUM}). Skipping fetch.")
+        print("Run the script a few more times to ensure you reach 100+ rows.")
         return 0
 
     print(f"\n[Breweries]: Fetching page {next_page} (Max {PER_PAGE_LIMIT} items) for '{state}'...")
 
+    # Configure API parameters for the fetch
     params = {
         'by_state': state,
         'per_page': PER_PAGE_LIMIT,
@@ -130,16 +138,18 @@ def fetch_and_store_breweries(conn, location_id, state=TARGET_STATE):
             )
             inserted_count += 1
         except sqlite3.IntegrityError:
+            # Handle potential duplicates if the API returns them
             continue
 
     conn.commit()
-    print(f"[Breweries]: Successfully stored {inserted_count} new entries. Total stored: {current_count + inserted_count}.")
+    print(f"[Breweries]: Successfully stored {inserted_count} new entries. Total stored so far: {current_count + inserted_count}.")
     return inserted_count
 
 def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG):
     """Fetches daily forecast data from Open-Meteo and stores it."""
     cur = conn.cursor()
 
+    # Use the parameters from your provided URL
     params = {
         'latitude': lat,
         'longitude': long,
@@ -157,15 +167,16 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG)
         print(f"Error fetching weather data: {e}")
         return 0
 
-    # ... (insertion logic is unchanged)
-
     inserted_count = 0
+    
+    # Extract parallel arrays from the JSON response
     dates = weather_data.get('time', [])
     max_temps = weather_data.get('temperature_2m_max', [])
     sunshine = weather_data.get('sunshine_duration', [])
     precip = weather_data.get('precipitation_sum', [])
     wind_gusts = weather_data.get('wind_gusts_10m_max', [])
     
+    # Insert data row by row
     for i in range(len(dates)):
         try:
             cur.execute(
@@ -177,39 +188,25 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG)
             )
             inserted_count += 1
         except sqlite3.IntegrityError:
+            # Skip if data for this date/location already exists
             continue
             
     conn.commit()
     print(f"[Weather]: Successfully stored {inserted_count} unique daily forecasts.")
     return inserted_count
 
-# --- 3. Data Processing (SQL Calculation and File Output) ---
-
-def write_calculation_to_file(data, filename='calculations.txt'):
-    """Writes the calculation results to a well-formatted text file. """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    output = f"--- Correlation Calculation Results ({timestamp}) ---\n"
-    output += f"Location: {TARGET_CITY}, {TARGET_STATE}\n\n"
-    output += f"Question: How does average forecast temperature relate to 'micro' brewery count?\n"
-    output += f"1. Average Max Temperature across recorded forecasts: {data['avg_temp']:.2f} °C\n"
-    output += f"2. Total number of 'micro' breweries stored: {data['micro_count']}\n"
-    output += f"----------------------------------------------------\n"
-    
-    # Append the results to the file
-    with open(filename, 'a') as f:
-        f.write(output)
-    
-    print(f"\n[Calculation]: Results appended to '{filename}'.")
+# --- 3. Data Processing (SQL Calculation) ---
 
 def run_correlation_calculation(conn, location_id):
     """
-    Performs the SQL calculation using a database JOIN. [cite: 103, 52, 50]
+    Performs a calculation by joining all three tables.
+    Calculates the average max temperature over the forecast period
+    and the total count of 'micro' breweries in the location.
     """
     cur = conn.cursor()
     
     # The SQL query joins Breweries, Locations, and Weather tables to compare aggregated data.
-    # Uses COUNT() and AVG() functions.
+    # This fulfills the "calculate something" rubric requirement using DB data.
     query = '''
     SELECT 
         ROUND(AVG(W.MaxTemp), 2) AS Avg_Max_Temp_C,
@@ -225,101 +222,68 @@ def run_correlation_calculation(conn, location_id):
     cur.execute(query, (location_id,))
     result = cur.fetchone()
     
+    print("\n--- Final Project Calculation Output ---")
     if result and result[0] is not None:
         avg_temp, micro_count = result
-        
-        # Write results to file
-        data = {'avg_temp': avg_temp, 'micro_count': micro_count}
-        write_calculation_to_file(data)
-        
+        print(f"Correlation Question: How does average forecast temperature relate to 'micro' brewery count?")
+        print(f"Location: {TARGET_CITY}, {TARGET_STATE} (ID: {location_id})")
+        print(f"1. Average Max Temperature across recorded forecasts: {avg_temp} °C")
+        print(f"2. Total number of 'micro' breweries stored: {micro_count}")
+        print("Interpretation: You now have the metrics needed to assess the correlation.")
+        print("--------------------------------------")
         return avg_temp, micro_count
     else:
-        print("\n[Calculation]: No data found for calculation.")
+        print("No data found for calculation. Ensure you have run the script enough times to fetch data.")
         return None, None
 
-# --- 4. Visualization (Requires 2 for a 2-person group) ---
+# --- 4. Visualization ---
 
 def create_visualization(db_name):
     """
-    VISUALIZATION 1/2: Bar Chart showing the count of major brewery types. 
+    Fetches data from the database and generates a visualization.
+    Creates a bar chart showing the count of major brewery types.
     """
     try:
         conn = sqlite3.connect(db_name)
-        # Query uses COUNT() and GROUP BY, suitable for a bar chart
+        
+        # Query to get the count of each brewery type
         query = '''
         SELECT 
             BreweryType, 
             COUNT(BreweryID) AS Count
         FROM Breweries
         GROUP BY BreweryType
-        HAVING Count > 0
         ORDER BY Count DESC
         LIMIT 5;
         '''
+        
         df = pd.read_sql_query(query, conn)
         conn.close()
 
         if df.empty:
-            print("\n[Visualization 1]: No brewery data to visualize.")
+            print("\n[Visualization]: No brewery data to visualize. Ensure you have run the script to fetch data.")
             return
 
+        # Create a Bar Chart
         plt.figure(figsize=(10, 6))
-        # Use a non-default color palette to avoid the "same as lecture" deduction [cite: 105, 61]
-        plt.bar(df['BreweryType'], df['Count'], color=['#4daf4a', '#377eb8', '#ff7f00', '#984ea3', '#e41a1c'])
+        plt.bar(df['BreweryType'], df['Count'], color='skyblue')
         
-        plt.title(f'Top 5 Brewery Types in {TARGET_STATE}', fontsize=14)
+        plt.title(f'Top 5 Brewery Types in {TARGET_STATE} (Total Breweries Stored)', fontsize=14)
         plt.xlabel('Brewery Type', fontsize=12)
         plt.ylabel('Count of Breweries', fontsize=12)
         plt.xticks(rotation=45, ha='right')
         plt.grid(axis='y', alpha=0.7)
         plt.tight_layout()
         
-        viz_filename = 'visualization_1_brewery_type_distribution.png'
-        plt.savefig(viz_filename)
-        print(f"\n[Visualization 1]: Bar chart saved as '{viz_filename}'.")
+        viz_filename = 'brewery_type_distribution.png'
+        plt.savefig(viz_filename) # Save the plot to a file
+        
+        print(f"\n[Visualization]: Bar chart saved as '{viz_filename}'.")
+        print("You must include this image in your final report!")
 
     except Exception as e:
-        print(f"\n[Visualization 1] Error creating visualization: {e}")
+        print(f"\n[Visualization] Error creating visualization: {e}")
 
-def create_temp_time_series_plot(db_name):
-    """
-    VISUALIZATION 2/2: Line plot showing Max Temperature over the forecast dates. 
-    """
-    try:
-        conn = sqlite3.connect(db_name)
-        # Query to get MaxTemp and Date from the Weather table
-        query = '''
-        SELECT 
-            Date, 
-            MaxTemp
-        FROM Weather
-        ORDER BY Date;
-        '''
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-
-        if df.empty:
-            print("\n[Visualization 2]: No weather data to visualize.")
-            return
-
-        df['Date'] = pd.to_datetime(df['Date'])
-        
-        plt.figure(figsize=(12, 6))
-        plt.plot(df['Date'], df['MaxTemp'], marker='o', linestyle='-', color='red', linewidth=2)
-        
-        plt.title(f'7-Day Max Temperature Forecast in {TARGET_CITY}', fontsize=14)
-        plt.xlabel('Date', fontsize=12)
-        plt.ylabel('Maximum Temperature (°C)', fontsize=12)
-        plt.grid(axis='y', alpha=0.5)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        viz_filename = 'visualization_2_temperature_time_series.png'
-        plt.savefig(viz_filename)
-        print(f"[Visualization 2]: Time series plot saved as '{viz_filename}'.")
-
-    except Exception as e:
-        print(f"\n[Visualization 2] Error creating visualization: {e}")
 
 # --- 5. Main Execution ---
 
@@ -333,33 +297,29 @@ def main():
     cur = conn.cursor()
     
     # 2. Get/Create Anchor Location (Ann Arbor, MI)
+    # This ID is the Foreign Key linking Breweries and Weather
     location_id_ann_arbor = get_or_create_location(cur, TARGET_CITY, TARGET_STATE, TARGET_LAT, TARGET_LONG)
     conn.commit()
     
     # 3. Data Gathering (API 1: Breweries)
+    # The script must be run multiple times to reach the 100 row minimum.
     print("\n---------------------------------------------------------")
-    print("NOTE: Run this script 4+ times to hit the 100+ rows minimum.")
+    print("ACTION REQUIRED: Run this script 4+ times to hit 100+ rows.")
     print("---------------------------------------------------------")
     fetch_and_store_breweries(conn, location_id_ann_arbor)
     
     # 4. Data Gathering (API 2: Weather)
+    # Fetches 7-14 days of forecast data once per run.
     fetch_and_store_weather(conn, location_id_ann_arbor)
     
-    # 5. Data Processing/Calculation (Writes to calculations.txt)
+    # 5. Data Processing/Calculation
     run_correlation_calculation(conn, location_id_ann_arbor)
     
-    # 6. Visualization (Creates two images)
+    # 6. Visualization
     create_visualization(DB_NAME)
-    create_temp_time_series_plot(DB_NAME)
 
     conn.close()
-    print("\n*** Project run complete. Check for .sqlite, .txt, and two .png files. ***")
+    print("\n*** Project run complete. Database connection closed. ***")
 
 if __name__ == "__main__":
-    # Check for required external libraries
-    try:
-        if __name__ == "__main__":
-            main()
-    except Exception as e:
-        print(f"An error occurred during execution: {e}")
-        print("Please ensure you have installed all required libraries: pip install requests pandas matplotlib")
+    main()
