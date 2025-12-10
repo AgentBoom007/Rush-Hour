@@ -15,7 +15,7 @@ WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 TARGET_LAT = 42.2776
 TARGET_LONG = -83.7409
 TARGET_CITY = "Ann Arbor"
-TARGET_STATE = "Michigan"
+TARGET_STATE = "Michigan" # Used for brewery filtering
 
 # Rubric Requirement: Max of 25 items stored per run
 PER_PAGE_LIMIT = 25 
@@ -88,8 +88,8 @@ def get_or_create_location(cur, city, state, lat, long):
 
 def fetch_and_store_breweries(conn, location_id, state=TARGET_STATE):
     """
-    Fetches up to 25 brewery items at a time. Designed to be run multiple times
-    to meet the 100-row minimum without changing the source code.
+    Fetches up to 25 brewery items at a time. The 'by_state=Michigan' filter
+    is applied here via the 'state' parameter derived from TARGET_STATE.
     """
     cur = conn.cursor()
     
@@ -104,6 +104,7 @@ def fetch_and_store_breweries(conn, location_id, state=TARGET_STATE):
 
     print(f"\n[Breweries]: Fetching page {next_page} (Max {PER_PAGE_LIMIT} items) for '{state}'...")
 
+    # The Michigan filter is applied here: 'by_state': state
     params = {
         'by_state': state,
         'per_page': PER_PAGE_LIMIT,
@@ -137,17 +138,25 @@ def fetch_and_store_breweries(conn, location_id, state=TARGET_STATE):
     return inserted_count
 
 def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG):
-    """Fetches daily forecast data from Open-Meteo and stores it."""
+    """
+    [FIXED] Fetches daily historical (92 days) and forecast (16 days) data 
+    using the new Open-Meteo API parameters.
+    """
     cur = conn.cursor()
 
+    # --- FINAL CORRECTED API PARAMETERS ---
     params = {
         'latitude': lat,
         'longitude': long,
+        # Only request the daily fields that match the Weather table columns
         'daily': 'temperature_2m_max,sunshine_duration,precipitation_sum,wind_gusts_10m_max',
+        'past_days': 92,     # CRITICAL: Ensures 92 historical days are fetched
+        'forecast_days': 16, # Ensures 16 forecast days are fetched
         'timezone': 'America/New_York'
     }
+    # ------------------------------------
     
-    print("\n[Weather]: Fetching daily forecast...")
+    print(f"\n[Weather]: Fetching {params['past_days']} days of historical and {params['forecast_days']} days of forecast data (up to 108 records)...")
     
     try:
         response = requests.get(WEATHER_URL, params=params)
@@ -158,6 +167,7 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG)
         return 0
 
     inserted_count = 0
+    # Data fields MUST match the 'daily' request parameters above
     dates = weather_data.get('time', [])
     max_temps = weather_data.get('temperature_2m_max', [])
     sunshine = weather_data.get('sunshine_duration', [])
@@ -178,7 +188,7 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG)
             continue
             
     conn.commit()
-    print(f"[Weather]: Successfully stored {inserted_count} unique daily forecasts.")
+    print(f"[Weather]: Successfully stored {inserted_count} unique daily records (up to 108 total).")
     return inserted_count
 
 # --- 3. Data Processing (SQL Calculation and File Output) ---
@@ -273,14 +283,14 @@ def create_visualization(db_name):
         viz_filename = 'visualization_1_brewery_type_distribution.png'
         plt.savefig(viz_filename)
         print(f"\n[Visualization 1]: Bar chart saved as '{viz_filename}'.")
-        plt.show() # ADDED: Displays the plot window
+        plt.show() # Displays the plot window
 
     except Exception as e:
         print(f"\n[Visualization 1] Error creating visualization: {e}")
 
 def create_temp_time_series_plot(db_name):
     """
-    VISUALIZATION 2/2: Line plot showing Max Temperature over the forecast dates.
+    VISUALIZATION 2/2: Line plot showing Max Temperature over the historical and forecast dates.
     """
     try:
         conn = sqlite3.connect(db_name)
@@ -301,9 +311,10 @@ def create_temp_time_series_plot(db_name):
         df['Date'] = pd.to_datetime(df['Date'])
         
         plt.figure(figsize=(12, 6))
+        # This plot now covers over 100 days of weather data!
         plt.plot(df['Date'], df['MaxTemp'], marker='o', linestyle='-', color='red', linewidth=2)
         
-        plt.title(f'7-Day Max Temperature Forecast in {TARGET_CITY}', fontsize=14)
+        plt.title(f'Historical and Forecast Max Temperature in {TARGET_CITY}', fontsize=14)
         plt.xlabel('Date', fontsize=12)
         plt.ylabel('Maximum Temperature (°C)', fontsize=12)
         plt.grid(axis='y', alpha=0.5)
@@ -313,7 +324,7 @@ def create_temp_time_series_plot(db_name):
         viz_filename = 'visualization_2_temperature_time_series.png'
         plt.savefig(viz_filename)
         print(f"[Visualization 2]: Time series plot saved as '{viz_filename}'.")
-        plt.show() # ADDED: Displays the plot window
+        plt.show() # Displays the plot window
 
     except Exception as e:
         print(f"\n[Visualization 2] Error creating visualization: {e}")
