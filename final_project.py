@@ -13,21 +13,21 @@ DB_NAME = 'brewery_weather_db.sqlite'
 BREWERY_BASE_URL = "https://api.openbrewerydb.org/v1/breweries"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
-# --- Primary Project Location (Ann Arbor, MI) ---
-TARGET_LAT = 42.2776
-TARGET_LONG = -83.7409
-TARGET_CITY = "Ann Arbor"
-TARGET_STATE = "Michigan"
+# --- Locations Configuration (API Requirements Finalized) ---
+CITIES = [
+    # PRIMARY API: Filter by State for Max Data (Michigan Breweries & Ann Arbor Weather)
+    {"city": "Ann Arbor", "state": "Michigan", "lat": 42.2776, "long": -83.7409, "filter_type": "state"},
+    # EXTRA CREDIT API: Filter by City/State (Dallas Breweries & Dallas Weather)
+    {"city": "Dallas", "state": "Texas", "lat": 32.7831, "long": -96.8067, "filter_type": "city_state"}
+]
 
-# --- Extra Credit Location (Dallas, TX) ---
-DALLAS_LAT = 32.7831
-DALLAS_LONG = -96.8067
-DALLAS_CITY = "Dallas"
-DALLAS_STATE = "Texas"
+# Primary location variables (used for calculation and file naming)
+TARGET_CITY = CITIES[0]['city']
+TARGET_STATE = CITIES[0]['state']
 
-# --- Rubric Compliance Configuration ---
-[cite_start]PER_PAGE_LIMIT = 25 # Rubric Requirement: Max of 25 items stored per run [cite: 47]
-[cite_start]ROW_MINIMUM = 100 # Rubric Requirement: Store at least 100 rows total [cite: 43]
+# Rubric Compliance Configuration
+PER_PAGE_LIMIT = 25 
+ROW_MINIMUM = 100 
 
 # ==============================================================================
 # 2. Database Functions
@@ -36,9 +36,6 @@ DALLAS_STATE = "Texas"
 def create_database(db_name):
     """
     Creates the database connection and the required tables.
-    Locations.LocationID is the INTEGER PRIMARY KEY shared across Breweries and Weather.
-    (This fulfills the requirement for at least one API to have two tables 
-     [cite_start]that share an integer key [cite: 44]).
     """
     conn = sqlite3.connect(db_name)
     cur = conn.cursor()
@@ -64,7 +61,7 @@ def create_database(db_name):
             WebsiteURL TEXT,
             LocationID INTEGER,
             FOREIGN KEY (LocationID) REFERENCES Locations(LocationID),
-            [cite_start]UNIQUE (Name, LocationID) -- Prevents duplicate string data [cite: 45]
+            UNIQUE (Name, LocationID)
         )
     ''')
 
@@ -78,7 +75,7 @@ def create_database(db_name):
             PrecipitationSum REAL,
             WindGustsMax REAL,
             LocationID INTEGER,
-            [cite_start]UNIQUE (Date, LocationID), -- Prevents duplicate string data [cite: 45]
+            UNIQUE (Date, LocationID),
             FOREIGN KEY (LocationID) REFERENCES Locations(LocationID)
         )
     ''')
@@ -98,40 +95,51 @@ def get_or_create_location(cur, city, state, lat, long):
         return cur.lastrowid
 
 # ==============================================================================
-# 3. Data Fetching and Insertion Functions (Primary Project)
+# 3. Data Fetching and Insertion Functions
 # ==============================================================================
 
-def fetch_and_store_breweries(conn, location_id, city=TARGET_CITY, state=TARGET_STATE):
+def fetch_and_store_breweries(conn, location_id, city_data):
     """
-    Fetches up to 25 brewery items for the Primary Location (Ann Arbor) at a time.
+    Fetches up to 25 brewery items at a time, using either 'by_state' or 'by_city' filter.
     """
     cur = conn.cursor()
+    city = city_data['city']
+    state = city_data['state']
     
     cur.execute("SELECT COUNT(*) FROM Breweries WHERE LocationID = ?", (location_id,))
     current_count = cur.fetchone()[0]
     
     next_page = (current_count // PER_PAGE_LIMIT) + 1
     
+    # Check if minimum is met (100 rows for each API)
     if current_count >= ROW_MINIMUM:
         print(f"\n[Breweries: {city}]: Already stored {current_count} rows (Target: {ROW_MINIMUM}). Skipping fetch.")
         return 0
 
     print(f"\n[Breweries: {city}]: Fetching page {next_page} (Max {PER_PAGE_LIMIT} items)...")
 
-    # Filter by city and state for precision
+    # Dynamic filter logic based on requirement
     params = {
-        'by_city': city,
-        'by_state': state,
         'per_page': PER_PAGE_LIMIT,
         'page': next_page
     }
     
+    if city_data['filter_type'] == 'state':
+        # Primary API (Michigan): Use by_state to maximize data for the 100-row minimum
+        params['by_state'] = state
+        print(f"  -> Using filter: by_state={state} (Primary API)")
+    else: # city_state (Dallas)
+        # Extra Credit API (Dallas): Use by_city and by_state as requested
+        params['by_city'] = city
+        params['by_state'] = state
+        print(f"  -> Using filter: by_city={city}&by_state={state} (Extra Credit API)")
+
     try:
         response = requests.get(BREWERY_BASE_URL, params=params)
         response.raise_for_status()
         brewery_data = response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching brewery data: {e}")
+        print(f"Error fetching brewery data for {city}: {e}")
         return 0
 
     inserted_count = 0
@@ -139,7 +147,7 @@ def fetch_and_store_breweries(conn, location_id, city=TARGET_CITY, state=TARGET_
         try:
             cur.execute(
                 '''
-                INSERT INTO Breweries (Name, BreweryType, WebsiteURL, LocationID) 
+                INSERT OR IGNORE INTO Breweries (Name, BreweryType, WebsiteURL, LocationID) 
                 VALUES (?, ?, ?, ?)
                 ''', 
                 (brewery.get('name'), brewery.get('brewery_type'), brewery.get('website_url'), location_id)
@@ -152,18 +160,21 @@ def fetch_and_store_breweries(conn, location_id, city=TARGET_CITY, state=TARGET_
     print(f"[Breweries: {city}]: Successfully stored {inserted_count} new entries. Total stored: {current_count + inserted_count}.")
     return inserted_count
 
-def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG, city=TARGET_CITY):
+def fetch_and_store_weather(conn, location_id, city_data):
     """
-    Fetches daily historical and forecast data for the Primary Location (Ann Arbor).
+    Fetches daily historical (92 days) and forecast (16 days) data 
+    using the Open-Meteo API for a given location (Lat/Long).
     """
     cur = conn.cursor()
-
+    city = city_data['city']
+    
+    # We only request the daily fields that match our Weather table columns
     params = {
-        'latitude': lat,
-        'longitude': long,
+        'latitude': city_data['lat'],
+        'longitude': city_data['long'],
         'daily': 'temperature_2m_max,sunshine_duration,precipitation_sum,wind_gusts_10m_max',
-        'past_days': 92,
-        'forecast_days': 16,
+        'past_days': 92,     
+        'forecast_days': 16, 
         'timezone': 'America/New_York'
     }
     
@@ -174,7 +185,7 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG,
         response.raise_for_status()
         weather_data = response.json().get('daily', {})
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching weather data: {e}")
+        print(f"Error fetching weather data for {city}: {e}")
         return 0
 
     inserted_count = 0
@@ -184,7 +195,6 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG,
     precip = weather_data.get('precipitation_sum', [])
     wind_gusts = weather_data.get('wind_gusts_10m_max', [])
     
-    # CRITICAL: Since weather fetches all data at once, the 25-limit rule does not apply here.
     for i in range(len(dates)):
         try:
             cur.execute(
@@ -199,45 +209,25 @@ def fetch_and_store_weather(conn, location_id, lat=TARGET_LAT, long=TARGET_LONG,
             continue
             
     conn.commit()
-    print(f"[Weather: {city}]: Successfully stored {inserted_count} unique daily records.")
+    print(f"[Weather: {city}]: Successfully stored {inserted_count} unique daily records (up to 108 total).")
     return inserted_count
 
 # ==============================================================================
-# 4. Data Fetching and Insertion Functions (Extra Credit - Dallas)
-# ==============================================================================
-
-def fetch_and_store_dallas_breweries(conn, location_id):
-    """
-    EXTRA API SOURCE: Fetches up to 25 Dallas brewery items at a time.
-    [cite_start](Must be run 4+ times to hit the 100 row minimum for Extra Credit [cite: 76]).
-    """
-    # Reusing the primary function logic but passing Dallas-specific params
-    return fetch_and_store_breweries(conn, location_id, city=DALLAS_CITY, state=DALLAS_STATE)
-
-def fetch_and_store_dallas_weather(conn, location_id):
-    """
-    SUPPORTING API: Fetches weather data for Dallas, TX.
-    """
-    # Reusing the primary function logic but passing Dallas-specific params
-    return fetch_and_store_weather(conn, location_id, lat=DALLAS_LAT, long=DALLAS_LONG, city=DALLAS_CITY)
-
-
-# ==============================================================================
-# 5. Data Processing (SQL Calculation and File Output)
+# 4. Data Processing (SQL Calculation and File Output)
 # ==============================================================================
 
 def write_calculation_to_file(data, filename='calculations.txt'):
-    [cite_start]"""Writes the calculation results to a well-formatted text file[cite: 55]."""
+    """Writes the calculation results to a well-formatted text file."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    output = f"\n--- Correlation Calculation Results ({timestamp}) ---\n"
+    output = f"--- Correlation Calculation Results ({timestamp}) ---\n"
     output += f"Location: {TARGET_CITY}, {TARGET_STATE}\n\n"
     output += f"Question: How does average forecast temperature relate to 'micro' brewery count?\n"
     output += f"1. Average Max Temperature across recorded forecasts: {data['avg_temp']:.2f} °C\n"
     output += f"2. Total number of 'micro' breweries stored: {data['micro_count']}\n"
     output += f"----------------------------------------------------\n"
     
-    # Append the results to the file
+    # Append the results to the file (Rubric requirement)
     with open(filename, 'a') as f:
         f.write(output)
     
@@ -245,12 +235,11 @@ def write_calculation_to_file(data, filename='calculations.txt'):
 
 def run_correlation_calculation(conn, location_id):
     """
-    [cite_start]Performs the primary SQL calculation using a database JOIN[cite: 52].
+    Performs the SQL calculation using a database JOIN, targeting the primary location.
     """
     cur = conn.cursor()
     
-    # Uses COUNT(DISTINCT) and AVG() functions and two explicit JOINs
-    # [cite_start]Fulfills the requirement to select data from all tables [cite: 50] [cite_start]and use a JOIN [cite: 52]
+    # Query must select from all three tables and use a join, and use an aggregate function (AVG and COUNT)
     query = '''
     SELECT 
         ROUND(AVG(W.MaxTemp), 2) AS Avg_Max_Temp_C,
@@ -279,11 +268,13 @@ def run_correlation_calculation(conn, location_id):
         return None, None
 
 # ==============================================================================
-# 6. Visualization (Requires 3 visualizations for 3-person group, 2 for 2-person)
+# 5. Visualization (Refactored to Handle Multiple Cities)
 # ==============================================================================
 
 def create_visualization_1(db_name):
-    """VISUALIZATION 1/3: Bar Chart showing the count of major brewery types (Primary)."""
+    """
+    VISUALIZATION 1/3: Bar Chart showing the count of major brewery types (Primary Viz).
+    """
     try:
         conn = sqlite3.connect(db_name)
         query = '''
@@ -304,10 +295,10 @@ def create_visualization_1(db_name):
             return
 
         plt.figure(figsize=(10, 6))
-        # [cite_start]Changed colors to avoid lecture example deduction [cite: 61]
+        # Changed colors to avoid lecture example deduction (Rubric requirement)
         plt.bar(df['BreweryType'], df['Count'], color=['#4daf4a', '#377eb8', '#ff7f00', '#984ea3', '#e41a1c'])
         
-        plt.title(f'Top 5 Brewery Types in ALL Locations', fontsize=14)
+        plt.title('Top 5 Brewery Types Across All Locations', fontsize=14)
         plt.xlabel('Brewery Type', fontsize=12)
         plt.ylabel('Count of Breweries', fontsize=12)
         plt.xticks(rotation=45, ha='right')
@@ -317,13 +308,15 @@ def create_visualization_1(db_name):
         viz_filename = 'visualization_1_brewery_type_distribution.png'
         plt.savefig(viz_filename)
         print(f"\n[Visualization 1]: Bar chart saved as '{viz_filename}'.")
-        # plt.show() # Displays the plot window
+        # plt.show()
 
     except Exception as e:
         print(f"\n[Visualization 1] Error creating visualization: {e}")
 
-def create_visualization_2(db_name):
-    """VISUALIZATION 2/3: Line plot showing Max Temperature over time (Primary)."""
+def create_visualization_2_time_series(db_name, city_data):
+    """
+    VISUALIZATION 2/3: Line plot showing Max Temperature over time (Primary Viz).
+    """
     try:
         conn = sqlite3.connect(db_name)
         query = f'''
@@ -331,14 +324,14 @@ def create_visualization_2(db_name):
             Date, 
             MaxTemp
         FROM Weather
-        WHERE LocationID = (SELECT LocationID FROM Locations WHERE City = '{TARGET_CITY}')
+        WHERE LocationID = (SELECT LocationID FROM Locations WHERE City = '{city_data['city']}')
         ORDER BY Date;
         '''
         df = pd.read_sql_query(query, conn)
         conn.close()
 
         if df.empty:
-            print(f"\n[Visualization 2]: No weather data for {TARGET_CITY} to visualize.")
+            print(f"\n[Visualization 2]: No weather data for {city_data['city']} to visualize.")
             return
 
         df['Date'] = pd.to_datetime(df['Date'])
@@ -346,62 +339,59 @@ def create_visualization_2(db_name):
         plt.figure(figsize=(12, 6))
         plt.plot(df['Date'], df['MaxTemp'], marker='o', linestyle='-', color='red', linewidth=2)
         
-        plt.title(f'Historical and Forecast Max Temperature in {TARGET_CITY}', fontsize=14)
+        plt.title(f'Historical and Forecast Max Temperature in {city_data['city']}', fontsize=14)
         plt.xlabel('Date', fontsize=12)
         plt.ylabel('Maximum Temperature (°C)', fontsize=12)
         plt.grid(axis='y', alpha=0.5)
         plt.xticks(rotation=45)
         plt.tight_layout()
         
-        viz_filename = 'visualization_2_ann_arbor_temp_time_series.png'
+        viz_filename = f"visualization_2_{city_data['city'].lower().replace(' ', '_')}_temp_time_series.png"
         plt.savefig(viz_filename)
         print(f"[Visualization 2]: Time series plot saved as '{viz_filename}'.")
-        # plt.show() # Displays the plot window
+        # plt.show()
 
     except Exception as e:
         print(f"\n[Visualization 2] Error creating visualization: {e}")
 
-def create_visualization_3_ec(db_name):
+def create_visualization_3_ec_scatter(db_name, city_data):
     """
-    VISUALIZATION 3/3 (EXTRA CREDIT): Scatter plot comparing max temp and wind gusts for Dallas.
-    [cite_start](This fulfills the requirement for an additional visualization [cite: 78, 80]).
+    VISUALIZATION 3/3 (EXTRA CREDIT): Scatter plot for the EC city (Dallas).
     """
     try:
         conn = sqlite3.connect(db_name)
-        # Selects only the data specific to the Dallas LocationID
         query = f'''
         SELECT 
             MaxTemp, 
             WindGustsMax
         FROM Weather
-        WHERE LocationID = (SELECT LocationID FROM Locations WHERE City = '{DALLAS_CITY}');
+        WHERE LocationID = (SELECT LocationID FROM Locations WHERE City = '{city_data['city']}');
         '''
         df = pd.read_sql_query(query, conn)
         conn.close()
 
         if df.empty:
-            print(f"\n[Visualization 3 (EC)]: No weather data for {DALLAS_CITY} to visualize.")
+            print(f"\n[Visualization 3 (EC)]: No weather data for {city_data['city']} to visualize.")
             return
 
         plt.figure(figsize=(10, 6))
-        # Create a scatter plot
         plt.scatter(df['MaxTemp'], df['WindGustsMax'], color='#e41a1c', alpha=0.6, edgecolors='w', linewidth=0.5)
         
-        plt.title(f'EC: Max Temperature vs. Max Wind Gusts in {DALLAS_CITY}', fontsize=14)
+        plt.title(f'EC: Max Temperature vs. Max Wind Gusts in {city_data['city']}', fontsize=14)
         plt.xlabel('Maximum Temperature (°C)', fontsize=12)
         plt.ylabel('Maximum Wind Gusts (m/s)', fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.5)
         
-        viz_filename = 'visualization_3_dallas_temp_wind_scatter_ec.png'
+        viz_filename = f"visualization_3_ec_{city_data['city'].lower().replace(' ', '_')}_temp_wind_scatter.png"
         plt.savefig(viz_filename)
         print(f"\n[Visualization 3 (EC)]: Scatter plot saved as '{viz_filename}'.")
-        # plt.show() # Displays the plot window
+        # plt.show()
 
     except Exception as e:
         print(f"\n[Visualization 3 (EC)] Error creating visualization: {e}")
 
 # ==============================================================================
-# 7. Main Execution
+# 6. Main Execution
 # ==============================================================================
 
 def main():
@@ -413,31 +403,38 @@ def main():
     conn = create_database(DB_NAME)
     cur = conn.cursor()
     
-    # 2. Get/Create Location IDs
-    location_id_ann_arbor = get_or_create_location(cur, TARGET_CITY, TARGET_STATE, TARGET_LAT, TARGET_LONG)
-    location_id_dallas = get_or_create_location(cur, DALLAS_CITY, DALLAS_STATE, DALLAS_LAT, DALLAS_LONG)
-    conn.commit()
-    
-    # 3. Data Gathering (PRIMARY APIs - Ann Arbor)
-    print("\n--- PRIMARY PROJECT DATA GATHERING (Ann Arbor) ---")
-    print("ACTION REQUIRED: Run this script 4+ times to hit the 100+ rows minimum.")
-    fetch_and_store_breweries(conn, location_id_ann_arbor)
-    fetch_and_store_weather(conn, location_id_ann_arbor)
-    
-    # 4. Data Gathering (EXTRA CREDIT APIs - Dallas)
-    print("\n--- EXTRA CREDIT DATA GATHERING (Dallas) ---")
-    # CRITICAL: This must be run 4+ times to hit the 100+ rows minimum for EC Breweries!
-    fetch_and_store_dallas_breweries(conn, location_id_dallas)
-    fetch_and_store_dallas_weather(conn, location_id_dallas)
-    
+    location_ids = {}
+
+    print("\n---------------------------------------------------------")
+    print("ACTION REQUIRED: Run this script 4+ times to hit the 100+ rows minimum for each city's breweries.")
+    print("---------------------------------------------------------")
+
+    # 2. Loop through all cities for data gathering
+    for city_data in CITIES:
+        # Get/Create Location ID
+        location_id = get_or_create_location(cur, city_data['city'], city_data['state'], city_data['lat'], city_data['long'])
+        location_ids[city_data['city']] = location_id
+        conn.commit()
+        
+        # 3. Data Gathering (API 1: Breweries)
+        fetch_and_store_breweries(conn, location_id, city_data)
+        
+        # 4. Data Gathering (API 2: Weather)
+        # Note: Weather APIs fetch all data in one run (92 historical + 16 forecast days)
+        fetch_and_store_weather(conn, location_id, city_data)
+        
     # 5. Data Processing/Calculation (Writes to calculations.txt)
-    # The primary calculation remains focused on the main Ann Arbor data
-    run_correlation_calculation(conn, location_id_ann_arbor) 
+    # Target the primary location (Ann Arbor) for the main correlation question
+    ann_arbor_id = location_ids[CITIES[0]['city']]
+    run_correlation_calculation(conn, ann_arbor_id)
     
     # 6. Visualization (Creates images)
-    create_visualization_1(DB_NAME)
-    create_visualization_2(DB_NAME)
-    create_visualization_3_ec(DB_NAME) # Extra Credit Visualization
+    ann_arbor_data = CITIES[0]
+    dallas_data = CITIES[1]
+
+    create_visualization_1(DB_NAME)                             # Viz 1 (All data)
+    create_visualization_2_time_series(DB_NAME, ann_arbor_data) # Viz 2 (Ann Arbor)
+    create_visualization_3_ec_scatter(DB_NAME, dallas_data)     # Viz 3 (Dallas - Extra Credit)
 
     conn.close()
     print("\n*** Project run complete. Check for .sqlite, .txt, and THREE .png files. ***")
@@ -445,9 +442,9 @@ def main():
 if __name__ == "__main__":
     # Check for required external libraries
     try:
-        # Note: We are running the main function inside the try/except block 
-        # to catch missing dependencies like 'requests', 'pandas', or 'matplotlib'.
         main()
     except Exception as e:
+        # If the error is a SyntaxError, the exception handler will print a generic message.
+        # This is a safety catch, but we want the actual traceback to fix the code errors.
         print(f"An error occurred during execution: {e}")
         print("Please ensure you have installed all required libraries: pip install requests pandas matplotlib")
