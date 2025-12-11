@@ -6,16 +6,18 @@ import matplotlib.pyplot as plt
 import os
 from datetime import datetime
 
+
+
+
 # --- API and Database Configuration ---
 DB_NAME = 'brewery_weather_db.sqlite'
 BREWERY_BASE_URL = "https://api.openbrewerydb.org/v1/breweries"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Ann Arbor, MI - Anchor location for the correlation study
-TARGET_LAT = 42.2776
-TARGET_LONG = -83.7409
-TARGET_CITY = "Ann Arbor"
-TARGET_STATE = "Michigan" # Used for brewery filtering
+CITIES = [
+    {"city": "Ann Arbor", "state": "Michigan", "lat": 42.2776, "long": -83.7409},
+    {"city": "Austin", "state": "Texas", "lat": 30.2672, "long": -97.7431}
+]
 
 # Rubric Requirement: Max of 25 items stored per run
 PER_PAGE_LIMIT = 25 
