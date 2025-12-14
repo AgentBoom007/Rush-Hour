@@ -48,7 +48,7 @@ def create_database(db_name):
             State TEXT NOT NULL,
             Latitude REAL,
             Longitude REAL,
-            UNIQUE (City, State)
+            UNIQUE (City, State) 
         )
     ''')
 
@@ -64,6 +64,7 @@ def create_database(db_name):
             UNIQUE (Name, LocationID)
         )
     ''')
+    
 
     # Table 3: WEATHER (Data from the second API, linked by LocationID)
     cur.execute('''
@@ -134,7 +135,7 @@ def fetch_and_store_breweries(conn, location_id, city_data):
         params['by_state'] = state
         print(f"  -> Using filter: by_city={city}&by_state={state} (Extra Credit API)")
 
-    try:
+    try: # API call brewery data
         response = requests.get(BREWERY_BASE_URL, params=params)
         response.raise_for_status()
         brewery_data = response.json()
@@ -179,9 +180,9 @@ def fetch_and_store_weather(conn, location_id, city_data):
     }
     
     print(f"\n[Weather: {city}]: Fetching up to 108 records...")
-    
+    # API call weather data
     try:
-        response = requests.get(WEATHER_URL, params=params)
+        response = requests.get(WEATHER_URL, params=params) 
         response.raise_for_status()
         weather_data = response.json().get('daily', {})
     except requests.exceptions.RequestException as e:
