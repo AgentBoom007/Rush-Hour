@@ -9,7 +9,7 @@ from datetime import datetime
 # ==============================================================================
 # 1. API and Database Configuration
 # ==============================================================================
-DB_NAME = 'brewery_weather_db.sqlite'
+DB_NAME = 'brewery_weather_db1.sqlite'
 BREWERY_BASE_URL = "https://api.openbrewerydb.org/v1/breweries"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -273,7 +273,7 @@ def run_correlation_calculation(conn, location_id):
 
 def create_visualization_1(db_name):
     """
-    VISUALIZATION 1/3: Bar Chart showing the count of major brewery types (Primary Viz).
+    VISUALIZATION 1/4: Bar Chart showing the count of major brewery types (Primary Viz).
     """
     try:
         conn = sqlite3.connect(db_name)
@@ -315,7 +315,7 @@ def create_visualization_1(db_name):
 
 def create_visualization_2_time_series(db_name, city_data):
     """
-    VISUALIZATION 2/3: Line plot showing Max Temperature over time (Primary Viz).
+    VISUALIZATION 2/4: Line plot showing Max Temperature over time (Primary Viz).
     """
     try:
         conn = sqlite3.connect(db_name)
@@ -356,7 +356,8 @@ def create_visualization_2_time_series(db_name, city_data):
 
 def create_visualization_3_ec_scatter(db_name, city_data):
     """
-    VISUALIZATION 3/3 (EXTRA CREDIT): Scatter plot for the EC city (Dallas).
+    VISUALIZATION 3/4 (EXTRA CREDIT): Scatter plot for the EC city (Dallas).
+    Compares MaxTemp vs. Max Wind Gusts.
     """
     try:
         conn = sqlite3.connect(db_name)
@@ -389,6 +390,52 @@ def create_visualization_3_ec_scatter(db_name, city_data):
 
     except Exception as e:
         print(f"\n[Visualization 3 (EC)] Error creating visualization: {e}")
+
+def create_visualization_4_city_comparison(db_name):
+    """
+    VISUALIZATION 4/4: Bar chart comparing the average daily sunshine duration between the two cities.
+    """
+    try:
+        conn = sqlite3.connect(db_name)
+        # SQL to calculate the average SunshineDuration for each city/location
+        query = '''
+        SELECT 
+            L.City, 
+            AVG(W.SunshineDuration) AS AvgSunshine
+        FROM Weather AS W
+        JOIN Locations AS L ON W.LocationID = L.LocationID
+        GROUP BY L.City
+        HAVING AvgSunshine IS NOT NULL;
+        '''
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        if df.empty:
+            print("\n[Visualization 4]: No weather data to compare cities.")
+            return
+
+        # Convert average sunshine from seconds to hours for better readability
+        df['AvgSunshine_Hours'] = df['AvgSunshine'] / 3600
+        
+        plt.figure(figsize=(8, 6))
+        # Use a consistent color scheme
+        colors = ['#f781bf', '#a65628'] 
+        plt.bar(df['City'], df['AvgSunshine_Hours'], color=colors)
+        
+        plt.title('Average Daily Sunshine Duration Comparison', fontsize=14)
+        plt.xlabel('City', fontsize=12)
+        plt.ylabel('Average Sunshine Duration (Hours)', fontsize=12)
+        plt.grid(axis='y', alpha=0.7)
+        plt.tight_layout()
+        
+        viz_filename = 'visualization_4_city_sunshine_comparison.png'
+        plt.savefig(viz_filename)
+        print(f"\n[Visualization 4]: Bar chart saved as '{viz_filename}'.")
+        # plt.show()
+
+    except Exception as e:
+        print(f"\n[Visualization 4] Error creating visualization: {e}")
+
 
 # ==============================================================================
 # 6. Main Execution
@@ -435,9 +482,10 @@ def main():
     create_visualization_1(DB_NAME)                             # Viz 1 (All data)
     create_visualization_2_time_series(DB_NAME, ann_arbor_data) # Viz 2 (Ann Arbor)
     create_visualization_3_ec_scatter(DB_NAME, dallas_data)     # Viz 3 (Dallas - Extra Credit)
+    create_visualization_4_city_comparison(DB_NAME)             # Viz 4 (New Comparison)
 
     conn.close()
-    print("\n*** Project run complete. Check for .sqlite, .txt, and THREE .png files. ***")
+    print("\n*** Project run complete. Check for .sqlite, .txt, and FOUR .png files. ***")
 
 if __name__ == "__main__":
     # Check for required external libraries
